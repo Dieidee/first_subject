@@ -1,0 +1,387 @@
+#include <SoftwareSerial.h> // 软串口头文件
+
+#define SWITCH_PIN A0  // 按键接A0（可换A1/A2
+bool car_running = false;   // 启停状态：false=关，true=开
+bool last_key_state = HIGH; // 按键上一次状态（内部上拉默认高）
+unsigned long debounce_time = 0;
+
+// -------------------------- 软串口配置--------------------------
+#define BUFFER_SIZE 16       // 缓冲区大小（不变）
+#define SOFT_RX 11           // 软串口RX=11（关键修改）
+#define SOFT_TX 12           // 软串口TX=12（关键修改）
+SoftwareSerial mySerial(SOFT_RX, SOFT_TX); // 初始化软串口
+
+//Get_left_count()
+#define left_A  2
+#define left_B  10
+volatile long count1=0;//脉冲计数
+long get_count1=0;
+
+//Get_right_count()
+#define right_A  3
+#define right_B  13
+volatile long count2=0;
+long get_count2=0;
+
+//Change_Count_into_Real_Speed()
+float v1=0,v2=0;//v1是左轮实际速度，v2是右轮实际速度
+
+
+//void Get_Openmv_Hope_Speed()      
+float w1=0,w2=0;//w1是左轮预期速度，w2是右轮预期速度
+//39.1,40直线
+//-39.1,40急右转
+//20，40，小右转（直径25cm）
+String op_signal=""; 
+bool dataReceived = false;
+
+//void Get_PID_Output_V()
+float error1=0,error2=0; //error1是左轮误差，error2是右轮误差 
+float p1=5,i1=2,d1=0.6;//左轮pid参数
+float p2=5,i2=2,d2=0.1;//右轮pid参数
+float i_limit=100,v_limit=255;//积分限幅，输出限幅
+float sum_error1=0,sum_error2=0;//积分
+float last_error1=0,last_error2=0;//上一次的误差
+int V1=0,V2=0;//输出电压（比例）
+
+//void Tell_Car_V()
+const int IN1 = 4, IN2 = 5, ENA = 6; 
+const int IN3 = 8, IN4 = 7, ENB = 9;
+
+long long t0=0,t1=0;
+
+void Get_left_count()
+{
+    if (digitalRead(left_B) == LOW) 
+    { 
+        // A相上升沿时，B相为高→正转
+        count1++;
+    } 
+    else 
+    { 
+        // A相上升沿时，B相为低→反转
+        count1--;
+    }
+}
+
+void Get_right_count()
+{
+    if (digitalRead(right_B) == HIGH) 
+    { 
+        // A相上升沿时，B相为高→正转
+        count2++;
+    } 
+    else 
+    { 
+        // A相上升沿时，B相为低→反转
+        count2--;
+    }
+}
+
+void Get_Openmv_Hope_Speed()
+{
+	int signal = op_signal.toInt();
+		switch(signal)
+		{
+			//以下需要调试w1,w2
+		case 1: w1=40; w2=-39.1; break; // 紧急左转 
+		case 2: w1=-39.1; w2=40; break; // 紧急右转  
+		case 3: w1=40; w2=0; break;     // 大左转 	
+		case 4: w1=0; w2=40; break;     // 大右转 
+		case 5: w1=40; w2=20; break;    // 小左转 
+		case 6: w1=20; w2=40; break;    // 小右转 
+		case 7: w1=39.1; w2=40; break;  // 直走 
+		default: w1=20; w2=20; break;   // 默认直走
+					
+		}
+	
+}
+
+void Get_PID_Output_V()
+{
+	//需要调试P,I,D参数 
+	error1=w1-v1;//获得误差 
+	sum_error1+=error1;//积分值 
+
+    
+    //积分限幅：如果不限幅，那么每当小车要改变预期速度，之前一直积累的I项就会很大，导致算出的电压过高
+    if(sum_error1>i_limit)
+    {
+        sum_error1=i_limit;
+    }
+    else if(sum_error1<-(i_limit))
+    {
+        sum_error1=-(i_limit);
+    }
+
+
+	V1=p1*error1+i1*sum_error1+d1*(error1-last_error1);//PID获得电压 
+	
+    last_error1=error1;//上一次的误差
+
+    //电压限幅，保证V在-255~255区间
+    if(V1>v_limit)
+    {
+        V1=v_limit;
+    }
+	  else if(V1<-(v_limit))
+    {
+        V1=-(v_limit);
+    }
+	
+    //下面是右轮的，与上面同理
+    
+    //需要调试P,I,D参数 
+	 error2=w2-v2;//获得误差 
+	sum_error2+=error2;//积分值 
+    
+    //积分限幅：如果不限幅，那么每当小车要改变预期速度，之前一直积累的I项就会很大，导致算出的电压过高
+    if(sum_error2>i_limit)
+    {
+        sum_error2=i_limit;
+    }
+    else if(sum_error2<-(i_limit))
+    {
+        sum_error2=-(i_limit);
+    }
+
+
+	  V2=p2*error2+i2*sum_error2+d2*(error2-last_error2);//PID获得电压 
+	
+    last_error2=error2;//上一次的误差
+
+    //电压限幅，保证V在-255~255区间
+    if(V2>v_limit)
+    {
+        V2=v_limit;
+    }
+	  else if(V2<-(v_limit))
+    {
+        V2=-(v_limit);
+    }
+}
+
+
+
+void Tell_Car_V()
+{
+    // 驱动：根据V1正负控制方向，绝对值为PWM值
+    
+        if (V1 > 0) 
+        {
+            digitalWrite(IN1, HIGH);
+            digitalWrite(IN2, LOW);
+            analogWrite(ENA,V1);
+        } 
+        else if (V1 < 0) 
+        {
+            digitalWrite(IN1, LOW);
+            digitalWrite(IN2, HIGH);
+            analogWrite(ENA, -V1);
+        } 
+        else 
+        {
+            analogWrite(ENA, 0);
+        }
+
+        // 右轮驱动（同左轮）
+        if (V2 > 0) 
+        {
+            digitalWrite(IN3, HIGH);
+            digitalWrite(IN4, LOW);
+            analogWrite(ENB, V2);
+        } 
+        else if (V2 < 0)
+        {
+            digitalWrite(IN3, LOW);
+            digitalWrite(IN4, HIGH);
+            analogWrite(ENB, -V2);
+        } 
+        else 
+        {
+            analogWrite(ENB, 0);
+        }
+
+}
+
+
+// -------------------------- 软串口接收函数（测试成功的逻辑）--------------------------
+void Receive_op_signal() {
+  char buffer[BUFFER_SIZE] = {0};
+  int bytesRead = 0;
+  bool foundDigit = false;
+
+  if (mySerial.available() > 0) {
+    // 读取整帧数据（直到缓冲区满或无数据）
+    while (mySerial.available() > 0 && bytesRead < BUFFER_SIZE - 1) {
+      buffer[bytesRead] = mySerial.read();
+      bytesRead++;
+      delayMicroseconds(10);
+    }
+    buffer[bytesRead] = '\0';
+
+    // 强制提取0-7有效数字
+    for (int i = 0; i < bytesRead; i++) {
+      if (buffer[i] >= '0' && buffer[i] <= '7') {
+        op_signal = buffer[i];
+        foundDigit = true;
+        
+        break;
+      }
+    }
+
+    if (foundDigit) {
+      dataReceived = true;
+      // 调试1：打印接收的信号（软串口接收成功）
+      Serial.print("接收信号：");
+      Serial.print(op_signal);
+      Serial.print(" | ");
+    }
+
+    // 清空软串口缓冲区
+    while (mySerial.available() > 0) {
+      mySerial.read();
+    }
+  }
+}
+
+void setup()
+{
+    
+    Serial.begin(19200); // 硬串口（可选，用于后续调试，不干扰软串口）
+	mySerial.begin(19200); // 软串口初始化（接收OpenMV信号）
+
+
+    //当A引脚电平由低电平变为高电平时触发中断服务程序
+
+    
+    attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+    attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+    
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(ENA, OUTPUT); 
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(ENB, OUTPUT);
+
+    pinMode(SWITCH_PIN, INPUT_PULLUP);
+
+    pinMode(left_A,INPUT_PULLUP);
+    pinMode(right_A,INPUT_PULLUP);
+    pinMode(left_B, INPUT_PULLUP);
+    pinMode(right_B, INPUT_PULLUP);
+
+
+	pinMode(SOFT_RX, INPUT_PULLUP); // 软串口RX引脚模式
+	pinMode(SOFT_TX, OUTPUT);       // 软串口TX引脚模式
+
+    t0=millis();
+
+}
+
+void loop()
+{
+	t1=millis();
+
+    bool current_key_state = digitalRead(SWITCH_PIN);
+	if (current_key_state != last_key_state && millis() - debounce_time > 20) {
+		debounce_time = millis();
+		if (current_key_state == LOW) { // 按键按下（低电平）
+			car_running = !car_running; // 切换启停状态
+			if (car_running) { digitalWrite(LED_BUILTIN, HIGH); Serial.println("=== 启动！开始循迹 ==="); }
+			else { V1=0; V2=0; Tell_Car_V(); digitalWrite(LED_BUILTIN, LOW); Serial.println("=== 关闭！电机停转 ==="); }
+		}
+	}
+	last_key_state = current_key_state; // 更新按键状态
+    if (car_running)
+    {
+    t1=millis();
+    
+    // 1. 软串口接收OpenMV信号（核心修改：用mySerial替代原硬串口）
+	Receive_op_signal();
+	
+	// 2. 解析信号，获取预期速度
+	if (dataReceived) {
+		Get_Openmv_Hope_Speed();
+        // 调试2：打印预期速度（w1=左轮预期，w2=右轮预期）
+		Serial.print("预期速度：w1=");
+		Serial.print(w1);
+		Serial.print(", w2=");
+		Serial.print(w2);
+		Serial.print(" | ");
+		dataReceived = false;
+		op_signal = "";
+	}
+  
+    if(t1-t0>=50)
+    {
+        
+        
+
+        // 关闭中断，避免计算时脉冲数被修改
+        detachInterrupt(digitalPinToInterrupt(left_A));
+        detachInterrupt(digitalPinToInterrupt(right_A));
+        // 计算转速：脉冲数 ÷ 车轮每转脉冲数 ÷ 时间（秒） × 60
+        // 车轮每转脉冲数 = 13PPR × 减速比120 = 1560
+        v1 = (count1 / 1560.0)  * 1200;
+        v2 = (count2 / 1560.0) * 1200;
+        
+        // 调试3：打印实际速度（v1=左轮实际，v2=右轮实际）
+		Serial.print("实际速度：v1=");
+		Serial.print(v1);
+		Serial.print(", v2=");
+		Serial.print(v2);
+		Serial.print(" | ");
+
+        
+
+        
+
+        // 重置计数和计时
+        count1 = 0;
+        count2 = 0;
+        t0=t1;
+
+        // 重新启用中断
+        attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+        attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+
+        //发送允许openmv发信号的信息"ALLOW_SEND"
+        
+        // Send_Allow_Command();
+
+        // //接收openmv的信号
+        // Receive_op_signal();
+        
+        // if (dataReceived) {
+        //     Get_Openmv_Hope_Speed();
+        //     dataReceived = false;
+        //     op_signal = ""; // 清空缓冲区
+        // }
+        // //从openmv得到信号并处理得到【当前预期速度】
+        
+        
+        Get_PID_Output_V();//对【误差】（预期速度-实际速度）进行PID算法，得到当前所需【电压 】V
+
+        // 调试4：打印PID输出电压（V1=左轮电压，V2=右轮电压）
+		Serial.print("PID输出：V1=");
+		Serial.print(V1);
+		Serial.print(", V2=");
+		Serial.println(V2); // 换行，每50ms打印一行完整信息
+
+        Tell_Car_V();//给电机提供【电压】 V的值，驱动电机 ，产生【当前实际速度】 
+    }
+    //从霍尔编码器得到【当前实际速度】的相关量count,并求出【当前实际速度】
+    //对【误差】（预期速度-实际速度）进行PID算法，得到当前所需【电压 】V
+	//给电机提供【电压】 V的值，驱动电机 ，产生【当前实际速度 】
+    }
+    else
+    {
+        // 关闭状态：确保电机停转
+		V1=0; 
+        V2=0; 
+        Tell_Car_V();
+    }
+	
+}

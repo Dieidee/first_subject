@@ -1,0 +1,230 @@
+//Get_left_count()
+#define left_A  2
+#define left_B 10
+volatile long count1=0;//脉冲计数
+long get_count1=0;
+
+//Get_right_count()
+#define right_A  3
+#define right_B 11
+volatile long count2=0;
+long get_count2=0;
+
+//Change_Count_into_Real_Speed()
+float v1=0,v2=0;//v1是左轮实际速度，v2是右轮实际速度
+
+
+//Get_Openmv_Hope_Speed()       
+float w1=0,w2=0;//w1是左轮预期速度，w2是右轮预期速度
+
+void Get_PID_Output_V();
+float error1=0,error2=0; //error1是左轮误差，error2是右轮误差 
+float p1=15,i1=2,d1=0.1;//左轮pid参数
+float p2=15,i2=2,d2=0.1;//右轮pid参数
+float i_limit=100,v_limit=255;//积分限幅，输出限幅
+float sum_error1=0,sum_error2=0;//积分
+float last_error1=0,last_error2=0;//上一次的误差
+int V1=0,V2=0;//输出电压（比例）
+
+void Tell_Car_V();
+const int IN1 = 4, IN2 = 5, ENA = 6; 
+const int IN3 = 8, IN4 = 7, ENB = 9;
+
+long long t0=0,t1=0;
+
+void Get_left_count()
+{
+    if (digitalRead(left_B) == LOW) 
+    { 
+        // A相上升沿时，B相为高→正转
+        count1++;
+    } 
+    else 
+    { 
+        // A相上升沿时，B相为低→反转
+        count1--;
+    }
+}
+
+void Get_right_count()
+{
+    if (digitalRead(right_B) == HIGH) 
+    { 
+        // A相上升沿时，B相为高→正转
+        count2++;
+    } 
+    else 
+    { 
+        // A相上升沿时，B相为低→反转
+        count2--;
+    }
+}
+
+void setup()
+{
+    
+	Serial.begin(9600);
+    //当A引脚电平由低电平变为高电平时触发中断服务程序
+
+    
+    attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+    attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+    
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(ENA, OUTPUT); 
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(ENB, OUTPUT);
+
+    pinMode(left_A,INPUT_PULLUP);
+    pinMode(right_A,INPUT_PULLUP);
+    pinMode(left_B, INPUT_PULLUP);
+    pinMode(right_B, INPUT_PULLUP);
+
+    t0=millis();
+}
+
+void loop()
+{
+	t1=millis();
+  
+    if(t1-t0>=50)
+    {
+        
+        
+
+        // 关闭中断，避免计算时脉冲数被修改
+        detachInterrupt(digitalPinToInterrupt(left_A));
+        detachInterrupt(digitalPinToInterrupt(right_A));
+        // 计算转速：脉冲数 ÷ 车轮每转脉冲数 ÷ 时间（秒） × 60
+        // 车轮每转脉冲数 = 13PPR × 减速比120 = 1560
+        v1 = (count1 / 1560.0)  * 1200;
+        v2 = (count2 / 1560.0) * 1200;
+        // 串口输出结果
+        
+        Serial.print(w1);
+        Serial.print(",");
+        Serial.print(v1);
+        Serial.print(",");
+        Serial.println(v2);
+
+        
+
+        // 重置计数和计时
+        count1 = 0;
+        count2 = 0;
+        t0=t1;
+
+        // 重新启用中断
+        attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+        attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+
+        //从openmv得到【当前预期速度】
+        Get_PID_Output_V();//对【误差】（预期速度-实际速度）进行PID算法，得到当前所需【电压 】V
+        Tell_Car_V();//给电机提供【电压】 V的值，驱动电机 ，产生【当前实际速度 】 
+    }
+    //从霍尔编码器得到【当前实际速度】的相关量count,并求出【当前实际速度】
+    //对【误差】（预期速度-实际速度）进行PID算法，得到当前所需【电压 】V
+	//给电机提供【电压】 V的值，驱动电机 ，产生【当前实际速度 】
+	  
+	
+}
+
+
+void Get_PID_Output_V()
+{
+	//需要调试P,I,D参数 
+	error1=w1-v1;//获得误差 
+	sum_error1+=error1;//积分值 
+
+    
+    //积分限幅：如果不限幅，那么每当小车要改变预期速度，之前一直积累的I项就会很大，导致算出的电压过高
+    if(sum_error1>i_limit)
+    {
+        sum_error1=i_limit;
+    }
+    else if(sum_error1<-(i_limit))
+    {
+        sum_error1=-(i_limit);
+    }
+
+
+	V1=p1*error1+i1*sum_error1+d1*(error1-last_error1);//PID获得电压 
+	
+    last_error1=error1;//上一次的误差
+
+    //电压限幅，保证V在-255~255区间
+    if(V1>v_limit)
+    {
+        V1=v_limit;
+    }
+	  else if(V1<-(v_limit))
+    {
+        V1=-(v_limit);
+    }
+	
+    //下面是右轮的，与上面同理
+    
+    //需要调试P,I,D参数 
+	 error2=w2-v2;//获得误差 
+	sum_error2+=error2;//积分值 
+    
+    //积分限幅：如果不限幅，那么每当小车要改变预期速度，之前一直积累的I项就会很大，导致算出的电压过高
+    if(sum_error2>i_limit)
+    {
+        sum_error2=i_limit;
+    }
+    else if(sum_error2<-(i_limit))
+    {
+        sum_error2=-(i_limit);
+    }
+
+
+	  V2=p2*error2+i2*sum_error2+d2*(error2-last_error2);//PID获得电压 
+	
+    last_error2=error2;//上一次的误差
+
+    //电压限幅，保证V在-255~255区间
+    if(V2>v_limit)
+    {
+        V2=v_limit;
+    }
+	  else if(V2<-(v_limit))
+    {
+        V2=-(v_limit);
+    }
+}
+
+void Tell_Car_V()
+{
+    // 左轮驱动：根据V1正负控制方向，绝对值为PWM值
+  if (V1 > 0) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,V1);
+  } else if (V1 < 0) {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    analogWrite(ENA, -V1);
+  } else {
+    analogWrite(ENA, 0);
+  }
+
+  // 右轮驱动（同左轮）
+  if (V2 > 0) {
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB, V2);
+  } else if (V2 < 0) {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+    analogWrite(ENB, -V2);
+  } else {
+    analogWrite(ENB, 0);
+  }
+
+
+
+}
+

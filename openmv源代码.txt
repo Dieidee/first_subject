@@ -1,0 +1,113 @@
+import sensor, image
+import time
+from pyb import UART
+
+# -------------------------- 1. 通信配置 --------------------------
+uart = UART(3, 19200)
+uart.init(19200, bits=8, parity=None, stop=1)
+
+# -------------------------- 2. 摄像头配置 --------------------------
+sensor.reset()
+sensor.set_pixformat(sensor.GRAYSCALE)
+sensor.set_framesize(sensor.QQVGA)  # 160x120分辨率
+sensor.skip_frames(time=2000)
+sensor.set_auto_gain(False)
+sensor.set_auto_exposure(False)
+
+black_threshold = [(0, 50)]  # 黑色线阈值
+
+# -------------------------- 3. 信号判断函数 --------------------------
+def get_signal(x):
+    """
+    根据中点x坐标判断转弯信号
+    1-急左转, 2-急右转, 3-中左转, 4-中右转, 5-小左转, 6-小右转, 7-直行
+    """
+    if 0 <= x < 35:         # 急左转
+        #return 1
+        return 6            #实际这种情况由外界影响，应该小右转
+
+    elif 35 <= x < 65:      # 中左转
+        #return 3
+        return 6            #实际这种情况由外界影响，应该小右转
+    elif 65 <= x < 75:      # 小左转
+        return 5
+    elif 75 <= x <= 85:     # 直行
+        return 7
+    elif 85 < x <= 95:      # 小右转
+        return 6
+    elif 95 < x <= 125:     # 中右转
+        #return 4
+        return 5            #实际上只有右线才会这样，反而应该左转
+    elif 125 < x <= 160:    # 急右转
+        #return 2
+        return 5             #实际上只有右线才会这样，反而应该左转
+    else:                   # 默认直行
+        return 7
+
+# -------------------------- 4. 主循环 --------------------------
+while True:
+    start_time = time.ticks_ms()
+    img = sensor.snapshot()
+
+    # 设置检测区域：
+    DETECTION_ROI = (0, 50, 160, 10)  # 中间区域
+
+    # 检测黑色线条
+    blobs = img.find_blobs(
+        black_threshold,
+        roi=DETECTION_ROI,
+        area_threshold=1,
+        pixels_threshold=1,
+        merge=True
+    )
+
+    # 计算两条黑线的中点
+    midpoint_x = 80  # 默认中心点（直行）
+    valid_detection = False
+
+    if len(blobs) >= 2:
+        # 找到两条黑线，计算中点
+        blobs.sort(key=lambda b: b.cx())
+        left_blob = blobs[0]
+        right_blob = blobs[1]
+        midpoint_x = (left_blob.cx() + right_blob.cx()) / 2
+        valid_detection = True
+
+        # 可视化：绘制检测到的黑线和中点
+        img.draw_rectangle(DETECTION_ROI, color=255)  # 标记检测区域
+        img.draw_circle(int(midpoint_x), 115, 3, color=255)  # 绘制中点
+        img.draw_line(int(midpoint_x), 110, int(midpoint_x), 119, color=255)  # 中线
+
+    elif len(blobs) == 1:
+        # 只有一条黑线，估算另一条线的位置
+        single_blob = blobs[0]
+        # if single_blob.cx() >= 80:
+        #     # 检测到的是右线，左线应该在左侧40像素
+        #     #midpoint_x = single_blob.cx() - 40
+        #     midpoint_x = single_blob.cx()/2
+        # else:
+        #     # 检测到的是左线，右线应该在右侧40像素
+        #     midpoint_x = single_blob.cx() + 40
+        midpoint_x = (single_blob.cx()+160)/2
+        valid_detection = True
+
+        # 可视化
+        img.draw_rectangle(DETECTION_ROI, color=255)
+        img.draw_circle(int(midpoint_x), 55, 3, color=255)
+        img.draw_line(int(midpoint_x), 110, int(midpoint_x), 119, color=255)
+
+    # 根据中点位置获取控制信号
+    signal = get_signal(midpoint_x)
+
+    # 发送信号给Arduino
+    uart.write((str(signal) + '\n').encode())
+
+    # 调试信息
+    if valid_detection:
+        print(f"中点X: {midpoint_x:.1f} | 信号: {signal} | 检测到{len(blobs)}条黑线")
+    else:
+        print("未检测到黑线，默认直行")
+
+    # 控制循环频率
+    elapsed = time.ticks_diff(time.ticks_ms(), start_time)
+    time.sleep_ms(max(0, 50 - elapsed))

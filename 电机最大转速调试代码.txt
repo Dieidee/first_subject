@@ -1,0 +1,180 @@
+// 测速调试代码：无PID、固定255电压、仅测速
+#define SWITCH_PIN A0  // 按键接A0，控制启停
+bool car_running = false;   // 启停状态：false=关，true=开
+bool last_key_state = HIGH; // 按键上一次状态（内部上拉默认高）
+unsigned long debounce_time = 0;
+
+// -------------------------- 霍尔编码器配置 --------------------------
+#define left_A  2    // 左轮A相引脚
+#define left_B  10   // 左轮B相引脚
+#define right_A 3    // 右轮A相引脚
+#define right_B 13   // 右轮B相引脚
+volatile long count1=0;    // 左轮脉冲计数（中断中更新）
+volatile long count2=0;    // 右轮脉冲计数（中断中更新）
+long get_count1=0;         // 临时存储左轮脉冲数（避免中断干扰）
+long get_count2=0;         // 临时存储右轮脉冲数
+float rpm1=0, rpm2=0;      // 左轮/右轮转速（单位：RPM，转/分钟）
+
+// 关键配置：根据你的编码器实际参数修改！
+#define PULSE_PER_ROTATE 1560  // 车轮每转脉冲数 = 编码器PPR × 减速比
+                                // 示例：13PPR × 减速比120 = 1560，需按实际硬件调整
+
+// -------------------------- 电机驱动配置 --------------------------
+const int IN1 = 4, IN2 = 5, ENA = 6;  // 左轮驱动引脚
+const int IN3 = 8, IN4 = 7, ENB = 9;  // 右轮驱动引脚
+const int MAX_VOLTAGE = 255;          // 固定输出电压（满占空比）
+
+// 计时变量：用于50ms采样一次转速
+unsigned long t0=0, t1=0;
+const unsigned long SAMPLE_INTERVAL = 50; // 采样间隔50ms（可改100ms提高精度）
+
+// -------------------------- 霍尔中断函数 --------------------------
+void Get_left_count()
+{
+    // A相上升沿时，根据B相电平判断转向，计数增减
+    if (digitalRead(left_B) == LOW) 
+    { 
+        count1++;  // 正转
+    } 
+    else 
+    { 
+        count1--;  // 反转
+    }
+}
+
+void Get_right_count()
+{
+    if (digitalRead(right_B) == HIGH) 
+    { 
+        count2++;  // 正转
+    } 
+    else 
+    { 
+        count2--;  // 反转
+    }
+}
+
+// -------------------------- 电机驱动函数（固定255电压） --------------------------
+void Drive_Car()
+{
+    if (!car_running) {
+        // 停止状态：电机断电
+        analogWrite(ENA, 0);
+        analogWrite(ENB, 0);
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
+        return;
+    }
+
+    // 运行状态：固定255电压，直线正转
+    // 左轮正转
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA, MAX_VOLTAGE);
+
+    // 右轮正转（和左轮转向一致，直线行驶）
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB, MAX_VOLTAGE);
+}
+
+void setup()
+{
+    // 初始化串口：波特率115200，打印测速数据
+    Serial.begin(19200); 
+    Serial.println("=== 小车测速调试程序 ===");
+    Serial.print("每转脉冲数配置：");
+    Serial.println(PULSE_PER_ROTATE);
+    Serial.println("按键A0启停，串口打印转速（RPM）");
+    Serial.println("--------------------------");
+
+    // 编码器中断配置：A相上升沿触发计数
+    attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+    attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+    
+    // 电机引脚初始化
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(ENA, OUTPUT); 
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(ENB, OUTPUT);
+
+    // 按键引脚初始化（内部上拉）
+    pinMode(SWITCH_PIN, INPUT_PULLUP);
+
+    // 编码器引脚初始化（内部上拉，防止电平抖动）
+    pinMode(left_A,INPUT_PULLUP);
+    pinMode(right_A,INPUT_PULLUP);
+    pinMode(left_B, INPUT_PULLUP);
+    pinMode(right_B, INPUT_PULLUP);
+
+    // 初始化计时
+    t0 = millis();
+}
+
+void loop()
+{
+    // -------------------------- 按键启停处理 --------------------------
+    bool current_key_state = digitalRead(SWITCH_PIN);
+    if (current_key_state != last_key_state && millis() - debounce_time > 20) {
+        debounce_time = millis();
+        if (current_key_state == LOW) { // 按键按下（低电平）
+            car_running = !car_running; // 切换启停状态
+            if (car_running) {
+                // 启动：重置计数和计时
+                count1 = 0;
+                count2 = 0;
+                t0 = millis();
+                digitalWrite(LED_BUILTIN, HIGH); 
+                Serial.println("\n=== 小车启动！输出电压255，开始测速 ===");
+            } else {
+                // 停止：电机断电
+                Drive_Car();
+                digitalWrite(LED_BUILTIN, LOW); 
+                Serial.println("=== 小车停止！===");
+            }
+        }
+    }
+    last_key_state = current_key_state; // 更新按键状态
+
+    // -------------------------- 电机驱动 --------------------------
+    Drive_Car();
+
+    // -------------------------- 转速计算（每50ms采样一次） --------------------------
+    t1 = millis();
+    if (car_running && (t1 - t0 >= SAMPLE_INTERVAL)) {
+        // 关闭中断：避免计算时脉冲数被中断修改，保证数据准确
+        detachInterrupt(digitalPinToInterrupt(left_A));
+        detachInterrupt(digitalPinToInterrupt(right_A));
+
+        // 读取脉冲数（临时变量存储，避免volatile变量直接计算）
+        get_count1 = count1;
+        get_count2 = count2;
+
+        // 重新启用中断
+        attachInterrupt(digitalPinToInterrupt(left_A), Get_left_count, RISING);
+        attachInterrupt(digitalPinToInterrupt(right_A), Get_right_count, RISING);
+
+        // 计算转速（RPM：转/分钟）
+        // 公式：转速 = (采样脉冲数 / 每转脉冲数) / 采样时间(秒) × 60
+        float sample_time = (t1 - t0) / 1000.0; // 采样时间（秒）
+        rpm1 = (abs(get_count1) / (float)PULSE_PER_ROTATE) / sample_time * 60;
+        rpm2 = (abs(get_count2) / (float)PULSE_PER_ROTATE) / sample_time * 60;
+
+        // 打印测速数据（串口调试）
+        
+        Serial.print("速度1：");
+        Serial.println(rpm1);
+        Serial.print("速度2：");
+        Serial.println(rpm2);
+        
+
+        // 重置计数和计时
+        count1 = 0;
+        count2 = 0;
+        t0 = t1;
+    }
+}
